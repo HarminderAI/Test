@@ -1,0 +1,26 @@
+# ==============================================================================
+# APEX EPOCH: INSTITUTIONAL QUANT ENGINE DEPENDENCIES
+# ==============================================================================
+
+# --- Core Data Manipulation & Vectorization ---
+# Pandas 2.2.0+ is recommended as the engine leverages the updated 'ME' resampling rules
+pandas>=2.2.0
+numpy>=1.24.0
+
+# --- Advanced Statistical Inference ---
+# Required for Probabilistic Sharpe (Euler-Mascheroni), Copulas, and HAC regressions
+scipy>=1.10.0
+statsmodels>=0.14.0
+
+# --- Visualization & Plotting (Optional/Future-Proofing) ---
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# --- Telemetry & Orchestration ---
+# Required by notifier.py for Telegram/Slack routing and exponential backoff
+requests>=2.31.0
+urllib3>=2.0.0
+
+# --- Utility & Version Management ---
+# Required by QuantEngine to dynamically parse local library versions
+packaging>=23.0
