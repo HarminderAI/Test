@@ -90,8 +90,9 @@ class AlphaDriftMonitor:
             return 1.0
 
         live_returns = self._fetch_normalized_returns(self.live_db, limit=100)
-        if len(live_returns) < self.min_trades:
-            logger.info(f"Accumulating live trades ({len(live_returns)}/{self.min_trades}). Drift Monitor warming up.")
+        # 🚨 PATCH: Check if live returns are empty before checking length
+        if live_returns is None or len(live_returns) < self.min_trades:
+            logger.info(f"Accumulating live trades ({len(live_returns) if live_returns is not None else 0}/{self.min_trades}). Drift Monitor warming up.")
             self._store_risk_multiplier(1.0)
             return 1.0
 
