@@ -345,6 +345,6 @@ class LogicEngine:
         return ta.atr(df["High"], df["Low"], df["Close"], config.ATR_PERIOD).iloc[-1]
 
     @staticmethod
-    def check_exit_conditions(df, pos_state):
+    def check_exit_conditions(df, pos_state, risk_mult=1.0):
         # Wraps the core engine logic to provide the bot with a standardized dictionary response
-        return evaluate_exit(df, pos_state)
+        return evaluate_exit(df, pos_state, risk_mult=risk_mult)
