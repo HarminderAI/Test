@@ -130,3 +130,21 @@ FOREX_TICKERS = {
     "GBPUSD=X",
     "JPY=X"
 }
+
+# ==============================================================================
+# 6. LOGIC & TRAILING STOP THRESHOLDS (Required by logic.py)
+# ==============================================================================
+SL_PRICE_BUFFER = 0.995        # 0.5% buffer for long stops
+SL_PRICE_BUFFER_SHORT = 1.005  # 0.5% buffer for short stops
+MIN_ATR_PCT = 0.015            # Minimum volatility to take a trade (1.5%)
+MAX_ATR_PCT = 0.08             # Maximum volatility to take a trade (8%)
+MIN_RISK_MULT = 0.3            # Maximum tightening allowed by Risk Governor
+EMA_MID = 50                   # Core structural trend line
+WEEKLY_CONFIRM_MODE = False    # Require weekly trend alignment?
+RESPECT_TIGHTEN_MODE = True    # Allow risk.py to override standard logic?
+MOMENTUM_R_THRESH = 2.0        # R-Multiple required to trigger momentum exit
+VOL_DRY_RATIO = 0.5            # Volume drop required to exit on momentum decay
+RSI_EXIT = 70                  # RSI overbought threshold
+ATR_TRAIL_MULT = 3.0           # Standard trailing stop distance
+TIGHTEN_MULT = 1.5             # Tightened trailing stop distance (Emergency)
+PARTIAL_BOOK_R = 3.0           # R-Multiple to automatically take partial profits
