@@ -330,4 +330,21 @@ def _validate_output(result, is_long, old_sl):
             result["reason"] = "Unknown Exit"
             
     return result
-    
+
+# ==========================================================
+# 4. BOT INTERFACE (The Engine Wrapper)
+# ==========================================================
+
+class LogicEngine:
+    @staticmethod
+    def get_atr(df):
+        return ta.atr(df["High"], df["Low"], df["Close"], config.ATR_PERIOD).iloc[-1]
+        
+    @staticmethod
+    def _calculate_atr(df):
+        return ta.atr(df["High"], df["Low"], df["Close"], config.ATR_PERIOD).iloc[-1]
+
+    @staticmethod
+    def check_exit_conditions(df, pos_state):
+        # Wraps the core engine logic to provide the bot with a standardized dictionary response
+        return evaluate_exit(df, pos_state)
