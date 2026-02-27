@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 from pathlib import Path
 from dataclasses import dataclass, asdict, fields
+from notifier import QuantNotifier
 from typing import Tuple, Dict, Optional, Union, Any, get_origin, get_args
 
 # --- CAPABILITY TRACKING ---
@@ -1141,6 +1142,9 @@ def generate_institutional_audit(db_path: str = "paper.db", output_dir: str = "r
         if report:
             QuantReporter(currency).print_console(report)
             logger.info(f"Pipeline Execution Successful in {report.meta.compute_time_sec:.3f}s.")
+            # 🚨 INJECT NOTIFIER HERE
+            notifier = QuantNotifier()
+            notifier.broadcast(report)
         else: logger.warning("Pipeline exited cleanly due to insufficient data.")
     except Exception as e: logger.error(f"Critical Pipeline Failure: {e}", exc_info=True)
 
