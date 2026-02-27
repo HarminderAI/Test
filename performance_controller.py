@@ -158,11 +158,6 @@ class PerformanceController:
         safe_gross = gross_val.replace(0, 1.0)
         returns = pnl / safe_gross
         
-        # Normalize returns by gross trade value to prevent dollar-inflation distortion
-        gross_val = trades.get("trade_value", trades["realized_pnl"].abs())
-        safe_gross = gross_val.replace(0, 1.0)
-        returns = pnl / safe_gross
-
         sharpe = self._compute_sharpe(returns)
         skew = returns.skew()
         kurtosis = returns.kurtosis()
