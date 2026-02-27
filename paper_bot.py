@@ -1,5 +1,5 @@
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import pandas as pd
 import sys
 import logging
@@ -9,20 +9,22 @@ import sqlite3
 # Import The Stack
 from mock_broker import MockBroker
 from logic import LogicEngine
+from risk import PortfolioGovernor
 import config
 from data import DataGuard
 
 # --- 1. SETUP LOGGING ---
 if not os.path.exists("logs"): os.makedirs("logs")
+# 🚨 STRICT UTC: Log files now use UTC date for consistency
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', 
-                    handlers=[logging.FileHandler(f"logs/paper_bot_{datetime.now().strftime('%Y%m%d')}.log"), logging.StreamHandler(sys.stdout)])
+                    handlers=[logging.FileHandler(f"logs/paper_bot_{datetime.now(timezone.utc).strftime('%Y%m%d')}.log"), logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger()
 
 # --- 2. GLOBAL RISK CONFIG ---
 MAX_OPEN_POSITIONS = 5          
 MIN_ATR_PERCENT = 0.015         
 MAX_ATR_PERCENT = 0.08          
-MAX_PORTFOLIO_HEAT = 0.06       
+# Note: config.MAX_PORTFOLIO_HEAT_PCT is used via the Governor now
 DAILY_DD_LIMIT = 0.05           
 INTRADAY_DD_LIMIT = 0.03        
 RISK_PER_TRADE_PCT = 0.01
@@ -30,6 +32,9 @@ MIN_OPERATING_EQUITY = 10000.0
 
 TICKERS = list(set(getattr(config, "TICKERS", ["RELIANCE.NS", "TCS.NS"])))
 broker = MockBroker(db_path="paper.db", initial_capital=100000.0)
+
+# 🚨 WIRE THE GOVERNOR: Initialize the central risk authority
+gov = PortfolioGovernor()
 
 # --- 3. PERSISTENT UTILITIES ---
 
@@ -53,21 +58,18 @@ def get_circuit_breaker(db_path):
             if row and row[0] == 'TRUE': return True
         return False
     except Exception as e:
-        # 🚨 THE FIX: Fail CLOSED. If DB is unreachable, HALT the system.
         logger.critical(f"🚨 CRITICAL: DB Error checking circuit breaker. FAILING CLOSED. {e}")
         return True 
 
 def trip_circuit_breaker(db_path, reason, residual=None):
     try:
         with sqlite3.connect(db_path) as conn:
-            conn.execute("INSERT OR REPLACE INTO system_status (key, value, timestamp) VALUES ('halted', 'TRUE', ?)", (datetime.utcnow().isoformat(),))
-            conn.execute("INSERT OR REPLACE INTO system_status (key, value, timestamp) VALUES ('halt_reason', ?, ?)", (str(reason), datetime.utcnow().isoformat()))
+            conn.execute("INSERT OR REPLACE INTO system_status (key, value, timestamp) VALUES ('halted', 'TRUE', ?)", (datetime.now(timezone.utc).isoformat(),))
+            conn.execute("INSERT OR REPLACE INTO system_status (key, value, timestamp) VALUES ('halt_reason', ?, ?)", (str(reason), datetime.now(timezone.utc).isoformat()))
             if residual:
-                conn.execute("INSERT OR REPLACE INTO system_status (key, value, timestamp) VALUES ('residual_risk', ?, ?)", (str(residual), datetime.utcnow().isoformat()))
+                conn.execute("INSERT OR REPLACE INTO system_status (key, value, timestamp) VALUES ('residual_risk', ?, ?)", (str(residual), datetime.now(timezone.utc).isoformat()))
             conn.commit()
     except: pass
-
-
 
 def get_session_high(db_path, current_equity):
     try:
@@ -75,7 +77,8 @@ def get_session_high(db_path, current_equity):
             row = conn.execute("SELECT value, timestamp FROM system_status WHERE key='session_high'").fetchone()
             if row:
                 stored_val = float(row[0])
-                if row[1][:10] == datetime.utcnow().isoformat()[:10]:
+                # 🚨 STRICT UTC matching
+                if row[1][:10] == datetime.now(timezone.utc).isoformat()[:10]:
                     return max(stored_val, current_equity)
     except: pass
     return current_equity
@@ -83,7 +86,7 @@ def get_session_high(db_path, current_equity):
 def update_session_high(db_path, equity):
     try:
         with sqlite3.connect(db_path) as conn:
-            conn.execute("INSERT OR REPLACE INTO system_status (key, value, timestamp) VALUES ('session_high', ?, ?)", (str(equity), datetime.utcnow().isoformat()))
+            conn.execute("INSERT OR REPLACE INTO system_status (key, value, timestamp) VALUES ('session_high', ?, ?)", (str(equity), datetime.now(timezone.utc).isoformat()))
             conn.commit()
     except: pass
 
@@ -111,11 +114,11 @@ def get_baseline_equity(db_path, current_equity):
 # --- 4. ENGINE CONTROLS ---
 
 def refresh_state():
-    """Fetches State, Valuation, and Heat."""
+    """Fetches State and Valuation. Heat logic moved to PortfolioGovernor."""
     cash = broker.get_cash()
     positions = broker.get_positions()
     equity = cash
-    heat = 0.0
+    
     for ticker, pos in positions.items():
         price = broker.get_live_price(ticker) or pos['avg_price']
         equity += (pos['qty'] * price)
@@ -124,27 +127,20 @@ def refresh_state():
         if not stop or stop <= 0:
             stop = pos['avg_price'] * 0.95
             broker.set_stop(ticker, stop)
-
-        # 🚨 THE FIX: True Liquidation Risk
-        # Heat is now explicitly calculated as max(0, Current Price - Stop).
-        # We no longer artificially shrink heat when a position goes red.
-        risk_per_share = max(0, price - stop)
-        heat += (risk_per_share * pos['qty'])
             
-    return cash, equity, positions, heat
+    return cash, equity, positions
 
 def shutdown_system(reason):
     """Verified Liquidation with Forensic Pre/Post Logging."""
     logger.critical(f"☢️ EMERGENCY SHUTDOWN: {reason}")
     trip_circuit_breaker("paper.db", reason) 
     
-    # 🚨 THE FIX: Forensic Equity Logging
-    _, equity_before, positions, _ = refresh_state()
+    _, equity_before, positions = refresh_state()
     logger.info(f"📊 Pre-Liquidation Equity: ₹{equity_before:,.2f} | Open Positions: {len(positions)}")
 
     for attempt in range(3):
         broker.liquidate_portfolio()
-        _, equity_after, positions, _ = refresh_state()
+        _, equity_after, positions = refresh_state()
         
         if not positions:
             logger.info(f"☢️ Liquidation Verified. Post-Liquidation Equity: ₹{equity_after:,.2f} (Impact: ₹{equity_after - equity_before:,.2f})")
@@ -178,11 +174,12 @@ def run_cycle():
         logger.critical("⛔ System is HALTED. Manual intervention required.")
         sys.exit(1)
     
-    if datetime.utcnow().weekday() >= 5:
+    # 🚨 STRICT UTC: Weekend check
+    if datetime.now(timezone.utc).weekday() >= 5:
         logger.warning("⛔ Weekend. Exiting.")
         return
 
-    cash, equity, positions, heat = refresh_state()
+    cash, equity, positions = refresh_state()
     baseline = get_baseline_equity("paper.db", equity)
     session_high = get_session_high("paper.db", equity)
     
@@ -191,16 +188,29 @@ def run_cycle():
     if equity < MIN_OPERATING_EQUITY:
         shutdown_system(f"Equity ₹{equity:.2f} below floor ₹{MIN_OPERATING_EQUITY:.2f}")
 
-    # 🚨 THE FIX: Data Caching to prevent multi-fetch inside the same run loop
+    # 🚨 WIRE THE GOVERNOR: Translate broker positions to Risk API format
+    gov_positions = []
+    for tkr, p in positions.items():
+        gov_positions.append({
+            "ticker": tkr,
+            "entry": p['avg_price'],
+            "initial_sl": p.get('initial_sl', p['stop_loss']), # Fallback to stop_loss if schema migration incomplete
+            "current_sl": p['stop_loss']
+        })
+        
+    # Calculate Institutional Heat & Tightening Multiplier
+    policy_heat = gov.calculate_policy_heat(gov_positions)
+    risk_mult = gov.get_risk_multiplier(current_heat=policy_heat)
+    logger.info(f"📊 Portfolio Heat: {policy_heat:.2f}R | Governor Multiplier: {risk_mult:.2f}")
+
     data_cache = {}
 
     for ticker in TICKERS:
         if is_ticker_locked("paper.db", ticker): continue
 
         try:
-            # Check Cache before hitting DataGuard
             if ticker not in data_cache:
-                time.sleep(1.0) # Respect API limits on initial fetch
+                time.sleep(1.0) 
                 data_cache[ticker] = DataGuard.fetch_data(ticker, "3mo", "1d")
                 
             history = data_cache[ticker]
@@ -215,6 +225,7 @@ def run_cycle():
                 qty = positions[ticker]['qty']
                 avg_price = positions[ticker]['avg_price']
                 stop = broker.get_stop(ticker)
+                initial_sl = positions[ticker].get('initial_sl', stop)
                 
                 if not stop or stop <= 0:
                     stop = avg_price * 0.95
@@ -224,22 +235,28 @@ def run_cycle():
                     fill_price = todays_open if todays_open < stop else stop
                     if broker.execute_order(ticker, qty, "SELL", "Hard Stop", price_override=fill_price):
                         lock_ticker("paper.db", ticker)
-                        cash, equity, positions, heat = refresh_state()
-                        session_high = check_risk_metrics(equity, baseline, session_high)
+                        cash, equity, positions = refresh_state()
                     continue
 
-                pos_state = {'side': 'long', 'entry': avg_price, 'current_sl': stop}
-                decision = LogicEngine.check_exit_conditions(history, pos_state)
+                # 🚨 Pass risk_mult and initial_sl to LogicEngine
+                pos_state = {'side': 'long', 'entry': avg_price, 'current_sl': stop, 'initial_sl': initial_sl}
+                decision = LogicEngine.check_exit_conditions(history, pos_state, risk_mult=risk_mult)
+                
                 if decision and decision['action'] == "EXIT":
                     if broker.execute_order(ticker, qty, "SELL", decision['reason']):
                         lock_ticker("paper.db", ticker)
-                        cash, equity, positions, heat = refresh_state()
-                        session_high = check_risk_metrics(equity, baseline, session_high)
+                        cash, equity, positions = refresh_state()
+                        
+                elif decision and decision['action'] in ["HOLD", "PARTIAL_EXIT"]:
+                    new_sl = decision.get("new_sl")
+                    if new_sl and new_sl > stop:
+                        broker.set_stop(ticker, new_sl)
 
             # --- PHASE B: ENTRIES ---
             else:
                 if len(positions) >= MAX_OPEN_POSITIONS: continue
-                if heat > (equity * MAX_PORTFOLIO_HEAT): continue
+                # 🚨 Block new entries if Policy Heat exceeds config limit
+                if policy_heat > config.MAX_PORTFOLIO_HEAT_PCT: continue
 
                 rolling_high = history['High'].shift(1).rolling(20).max()
                 if (last_close > rolling_high.iloc[-1]) and (history['Close'].iloc[-2] <= rolling_high.iloc[-2]):
@@ -250,7 +267,6 @@ def run_cycle():
                     vol_ratio = atr / last_close
                     if vol_ratio < MIN_ATR_PERCENT or vol_ratio > MAX_ATR_PERCENT: continue
 
-                    # 🚨 THE FIX: Stable Sizing Logic
                     risk_amt = baseline * RISK_PER_TRADE_PCT
                     est_entry = last_close * (1 + getattr(config, "SLIPPAGE_PCT", 0.0005))
                     stop_loss = last_close - (atr * 2.0)
@@ -263,14 +279,14 @@ def run_cycle():
                     if (qty * est_entry) > cash: qty = int(cash / est_entry)
                     if qty <= 0: continue
 
-                    added_risk = qty * (est_entry - stop_loss)
-                    if (heat + added_risk) > (equity * MAX_PORTFOLIO_HEAT): continue
-
                     logger.info(f"⚔️ BUYING {qty} {ticker}")
                     if broker.execute_order(ticker, qty, "BUY", "Breakout", stop_loss=stop_loss):
                         lock_ticker("paper.db", ticker)
-                        cash, equity, positions, heat = refresh_state()
-                        session_high = check_risk_metrics(equity, baseline, session_high)
+                        cash, equity, positions = refresh_state()
+                        
+                        # 🚨 Update heat dynamically after entry to prevent over-leveraging mid-loop
+                        gov_positions.append({"ticker": ticker, "entry": est_entry, "initial_sl": stop_loss, "current_sl": stop_loss})
+                        policy_heat = gov.calculate_policy_heat(gov_positions)
                     
         except Exception as e:
             logger.error(f"💥 Error processing {ticker}: {e}", exc_info=True)
