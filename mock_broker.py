@@ -60,7 +60,8 @@ class MockBroker:
                     ticker TEXT PRIMARY KEY,
                     qty REAL NOT NULL CHECK (qty > 0),
                     avg_price REAL NOT NULL CHECK (avg_price >= 0),
-                    stop_loss REAL DEFAULT 0.0
+                    stop_loss REAL DEFAULT 0.0,
+                    initial_sl REAL DEFAULT 0.0
                 )
             """)
 
@@ -115,17 +116,21 @@ class MockBroker:
         except Exception: pass
         return False
 
-    def halt_broker(self, reason: str):
+    def halt_broker(self, reason: str, active_conn=None):
         """
         Locks the Broker across reboots.
         🚨 RESTORED: Uses its own isolated connection to prevent rollback erasure.
         """
         timestamp = datetime.now(timezone.utc).isoformat()
         try:
-            with self._get_conn() as conn:
-                conn.execute("INSERT OR REPLACE INTO broker_status (key, value, timestamp) VALUES ('halted', 'TRUE', ?)", (timestamp,))
-                conn.execute("INSERT OR REPLACE INTO broker_status (key, value, timestamp) VALUES ('halt_reason', ?, ?)", (str(reason), timestamp))
-                conn.commit()
+            if active_conn:
+                active_conn.execute("INSERT OR REPLACE INTO broker_status (key, value, timestamp) VALUES ('halted', 'TRUE', ?)", (timestamp,))
+                active_conn.execute("INSERT OR REPLACE INTO broker_status (key, value, timestamp) VALUES ('halt_reason', ?, ?)", (str(reason), timestamp))
+            else:
+                with self._get_conn() as conn:
+                    conn.execute("INSERT OR REPLACE INTO broker_status (key, value, timestamp) VALUES ('halted', 'TRUE', ?)", (timestamp,))
+                    conn.execute("INSERT OR REPLACE INTO broker_status (key, value, timestamp) VALUES ('halt_reason', ?, ?)", (str(reason), timestamp))
+                    conn.commit()
             logger.critical(f"🔒 BROKER PERSISTENTLY HALTED: {reason}")
         except Exception as e:
             logger.critical(f"FATAL: Failed to persist Broker Halt State: {e}")
@@ -183,8 +188,8 @@ class MockBroker:
 
     def get_positions(self):
         with self._get_conn() as conn:
-            rows = conn.execute("SELECT ticker, qty, avg_price, stop_loss FROM positions").fetchall()
-            return {r['ticker']: {'qty': r['qty'], 'avg_price': r['avg_price'], 'stop_loss': r['stop_loss']} for r in rows}
+            rows = conn.execute("SELECT ticker, qty, avg_price, stop_loss, initial_sl FROM positions").fetchall()
+            return {r['ticker']: {'qty': r['qty'], 'avg_price': r['avg_price'], 'stop_loss': r['stop_loss'], 'initial_sl': r['initial_sl']} for r in rows}
 
     def get_stop(self, ticker):
         with self._get_conn() as conn:
@@ -237,7 +242,6 @@ class MockBroker:
                 one_min_ago = (datetime.now(timezone.utc) - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
                 trade_count_row = conn.execute("SELECT COUNT(*) as cnt FROM trades WHERE date >= ?", (one_min_ago,)).fetchone()
                 
-                # 🚨 FIX: Raise custom exception to trigger rollback BEFORE halting
                 if trade_count_row and trade_count_row['cnt'] >= self.max_trades_per_min:
                     raise FiduciaryHaltException(f"Execution Throttle Breached: {trade_count_row['cnt']} trades in 60s. Malicious loop suspected.")
                 
@@ -278,13 +282,12 @@ class MockBroker:
                     baseline_eq = self.get_daily_baseline(est_equity)
                     current_dd = (baseline_eq - est_equity) / baseline_eq
                     
-                    # 🚨 FIX: Raise custom exception to trigger rollback BEFORE halting
                     if baseline_eq > 0 and current_dd > self.broker_dd_limit:
                         raise FiduciaryHaltException(f"System in {current_dd*100:.2f}% daily drawdown. Fiduciary limit breached.")
                     
                     conn.execute("UPDATE account SET cash = round(cash - ?, 2) WHERE id=1", (net_val,))
                     
-                    pos = conn.execute("SELECT qty, avg_price, stop_loss FROM positions WHERE ticker=?", (ticker,)).fetchone()
+                    pos = conn.execute("SELECT qty, avg_price, stop_loss, initial_sl FROM positions WHERE ticker=?", (ticker,)).fetchone()
                     if pos:
                         new_qty = round(pos['qty'] + qty, qty_prec)
                         current_cost = pos['qty'] * pos['avg_price']
@@ -293,8 +296,8 @@ class MockBroker:
                         
                         conn.execute("UPDATE positions SET qty=?, avg_price=?, stop_loss=? WHERE ticker=?", (new_qty, new_avg, safe_stop, ticker))
                     else:
-                        conn.execute("INSERT INTO positions (ticker, qty, avg_price, stop_loss) VALUES (?, ?, ?, ?)", 
-                                     (ticker, qty, round(net_val/qty, price_prec), stop_loss))
+                        conn.execute("INSERT INTO positions (ticker, qty, avg_price, stop_loss, initial_sl) VALUES (?, ?, ?, ?, ?)", 
+                                     (ticker, qty, round(net_val/qty, price_prec), stop_loss, stop_loss))
                     
                     pnl = 0.0
                     print(f"✅ BUY {qty} {ticker} @ {exec_price}")
@@ -331,10 +334,9 @@ class MockBroker:
                 
                 conn.commit()
 
-        # 🚨 FIX: The Exception Router. Drops the lock, then writes the halt state cleanly.
         except FiduciaryHaltException as fhe:
             logger.critical(f"🚨 Fiduciary Guardrail Triggered: {fhe}")
-            self.halt_broker(str(fhe))
+            self.halt_broker(str(fhe), active_conn=None) 
             return False
             
         except ConnectionError as ce:
