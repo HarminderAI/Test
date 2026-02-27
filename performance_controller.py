@@ -149,6 +149,14 @@ class PerformanceController:
             return 1.0
 
         pnl = trades["realized_pnl"]
+        # 🚨 PATCH: Safe DataFrame column access
+        if "trade_value" in trades.columns:
+            gross_val = trades["trade_value"]
+        else:
+            gross_val = pnl.abs()
+            
+        safe_gross = gross_val.replace(0, 1.0)
+        returns = pnl / safe_gross
         
         # Normalize returns by gross trade value to prevent dollar-inflation distortion
         gross_val = trades.get("trade_value", trades["realized_pnl"].abs())
