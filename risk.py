@@ -227,6 +227,26 @@ class PortfolioGovernor:
         return float(total_r)
 
     def get_risk_multiplier(self, current_heat=None, positions=None):
+        # 🚨 THE DUAL-LAYER WIRING: Read both adaptive states
+        perf_mult = 1.0
+        drift_mult = 1.0
+        
+        try:
+            with sqlite3.connect("paper.db", timeout=5) as conn:
+                # 🚨 PATCH: Check if table exists before querying to prevent noisy logs on initial boot
+                table_exists = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='broker_status'").fetchone()
+                if table_exists:
+                    # 1. Read Performance Controller (Sharpe/Expectancy decay)
+                    row_perf = conn.execute("SELECT value FROM broker_status WHERE key='adaptive_risk_mult'").fetchone()
+                    if row_perf: perf_mult = float(row_perf[0])
+                    
+                    # 2. Read Drift Monitor (Distribution/Shape decay)
+                    row_drift = conn.execute("SELECT value FROM broker_status WHERE key='drift_risk_mult'").fetchone()
+                    if row_drift: drift_mult = float(row_drift[0])
+        except Exception as e:
+            # 🚨 PATCH: Log the exception subtly for debugging
+            logger.debug(f"Could not read dynamic risk multipliers: {e}")
+        
         """
         Returns a multiplier (min_mult to 1.0) based on Portfolio Heat.
         """
